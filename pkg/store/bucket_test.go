@@ -1075,45 +1075,51 @@ func newSeries(t testing.TB, lset labels.Labels, smplChunks [][]sample) storepb.
 	return s
 }
 
-func TestSeries(t *testing.T) {
+func TestBucketSeries(t *testing.T) {
 	tb := testutil.NewTB(t)
 	tb.Run("200e3SeriesWithOneSample", func(tb testutil.TB) {
-		benchSeries(tb, 200e3, seriesDimension, 200e3)
+		benchBucketSeries(tb, 200e3, seriesDimension, 200e3)
 	})
 	tb.Run("OneSeriesWith200e3Samples", func(tb testutil.TB) {
-		benchSeries(tb, 200e3, samplesDimension, 200e3)
+		benchBucketSeries(tb, 200e3, samplesDimension, 200e3)
 	})
 }
 
-func BenchmarkSeries(b *testing.B) {
+func BenchmarkBucketSeries(b *testing.B) {
 	tb := testutil.NewTB(b)
 	tb.Run("10e6SeriesWithOneSample", func(tb testutil.TB) {
-		benchSeries(tb, 10e6, seriesDimension, 1, 10, 10e1, 10e2, 10e3, 10e4, 10e5) // This is too big for my machine: 10e6.
+		benchBucketSeries(tb, 10e6, seriesDimension, 1, 10, 10e1, 10e2, 10e3, 10e4, 10e5) // This is too big for my machine: 10e6.
 	})
 	tb.Run("OneSeriesWith100e6Samples", func(tb testutil.TB) {
 		// 100e6 samples = ~17361 days with 15s scrape.
-		benchSeries(tb, 100e6, samplesDimension, 1, 10, 10e1, 10e2, 10e3, 10e4, 10e5, 10e6) // This is too big for my machine: 100e6.
+		benchBucketSeries(tb, 100e6, samplesDimension, 1, 10, 10e1, 10e2, 10e3, 10e4, 10e5, 10e6) // This is too big for my machine: 100e6.
 	})
+}
+
+func createSeriesWithOneSample(t testutil.TB, j int, totalSeries int, extraAppender tsdb.Appender) []storepb.Series {
+	series := make([]storepb.Series, totalSeries)
+	var ts int64
+	var lbls labels.Labels
+	for i := 0; i < totalSeries; i++ {
+		ts = int64(j*totalSeries + i)
+		lbls = labels.FromStrings("foo", "bar", "i", fmt.Sprintf("%07d%s", ts, postingsBenchSuffix))
+		series[i] = newSeries(t, append(labels.Labels{{Name: "ext1", Value: "1"}}, lbls...), [][]sample{{sample{t: ts, v: 0}}})
+
+		_, err := extraAppender.Add(lbls, ts, 0)
+		testutil.Ok(t, err)
+	}
+	return series
 }
 
 func createBlockWithOneSample(t testutil.TB, dir string, blockIndex int, totalSeries int) (ulid.ULID, []storepb.Series) {
 	fmt.Println("Building block with numSeries:", totalSeries)
 
-	var series []storepb.Series
 	h, err := tsdb.NewHead(nil, nil, nil, 1)
 	testutil.Ok(t, err)
 	defer testutil.Ok(t, h.Close())
 
 	app := h.Appender()
-
-	for i := 0; i < totalSeries; i++ {
-		ts := int64(blockIndex*totalSeries + i)
-		lbls := labels.FromStrings("foo", "bar", "i", fmt.Sprintf("%07d%s", ts, postingsBenchSuffix))
-		series = append(series, newSeries(t, append(labels.Labels{{Name: "ext1", Value: "1"}}, lbls...), [][]sample{{sample{t: ts, v: 0}}}))
-
-		_, err := app.Add(lbls, ts, 0)
-		testutil.Ok(t, err)
-	}
+	series := createSeriesWithOneSample(t, blockIndex, totalSeries, app)
 	testutil.Ok(t, app.Commit())
 
 	return createBlockFromHead(t, dir, h), series
@@ -1146,8 +1152,8 @@ const (
 	samplesDimension = Dimension("samples")
 )
 
-func benchSeries(t testutil.TB, number int, dimension Dimension, cases ...int) {
-	tmpDir, err := ioutil.TempDir("", "testorbench-series")
+func benchBucketSeries(t testutil.TB, number int, dimension Dimension, cases ...int) {
+	tmpDir, err := ioutil.TempDir("", "testorbench-bucketseries")
 	testutil.Ok(t, err)
 	defer func() { testutil.Ok(t, os.RemoveAll(tmpDir)) }()
 
@@ -1345,7 +1351,6 @@ func benchSeries(t testutil.TB, number int, dimension Dimension, cases ...int) {
 		})
 	}
 
-	fmt.Println("Starting")
 	benchmarkSeries(t, store, bCases)
 	if !t.IsBenchmark() {
 		// Make sure the pool is correctly used. This is expected for 200k numbers.
@@ -1408,7 +1413,7 @@ type benchSeriesCase struct {
 	expected []storepb.Series
 }
 
-func benchmarkSeries(t testutil.TB, store *BucketStore, cases []*benchSeriesCase) {
+func benchmarkSeries(t testutil.TB, store storepb.StoreServer, cases []*benchSeriesCase) {
 	for _, c := range cases {
 		t.Run(c.name, func(t testutil.TB) {
 			t.ResetTimer()
@@ -1420,7 +1425,7 @@ func benchmarkSeries(t testutil.TB, store *BucketStore, cases []*benchSeriesCase
 
 				if !t.IsBenchmark() {
 					if len(c.expected) == 1 {
-						// Chunks are not sorted within response. TODO: Investigate: Is this fine?
+						// For bucketStoreAPI chunks are not sorted within response. TODO: Investigate: Is this fine?
 						sort.Slice(srv.SeriesSet[0].Chunks, func(i, j int) bool {
 							return srv.SeriesSet[0].Chunks[i].MinTime < srv.SeriesSet[0].Chunks[j].MinTime
 						})
@@ -1435,7 +1440,7 @@ func benchmarkSeries(t testutil.TB, store *BucketStore, cases []*benchSeriesCase
 }
 
 // Regression test against: https://github.com/thanos-io/thanos/issues/2147.
-func TestSeries_OneBlock_InMemIndexCacheSegfault(t *testing.T) {
+func TestBucketSeries_OneBlock_InMemIndexCacheSegfault(t *testing.T) {
 	tmpDir, err := ioutil.TempDir("", "segfault-series")
 	testutil.Ok(t, err)
 	defer func() { testutil.Ok(t, os.RemoveAll(tmpDir)) }()

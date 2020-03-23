@@ -1405,29 +1405,7 @@ func (c *StoreSeriesClient) Context() context.Context {
 
 // storeSeriesResponse creates test storepb.SeriesResponse that includes series with single chunk that stores all the given samples.
 func storeSeriesResponse(t testing.TB, lset labels.Labels, smplChunks ...[]sample) *storepb.SeriesResponse {
-	var s storepb.Series
-
-	for _, l := range lset {
-		s.Labels = append(s.Labels, storepb.Label{Name: l.Name, Value: l.Value})
-	}
-
-	for _, smpls := range smplChunks {
-		c := chunkenc.NewXORChunk()
-		a, err := c.Appender()
-		testutil.Ok(t, err)
-
-		for _, smpl := range smpls {
-			a.Append(smpl.t, smpl.v)
-		}
-
-		ch := storepb.AggrChunk{
-			MinTime: smpls[0].t,
-			MaxTime: smpls[len(smpls)-1].t,
-			Raw:     &storepb.Chunk{Type: storepb.Chunk_XOR, Data: c.Bytes()},
-		}
-
-		s.Chunks = append(s.Chunks, ch)
-	}
+	s := newSeries(t, lset, smplChunks)
 	return storepb.NewSeriesResponse(&s)
 }
 
